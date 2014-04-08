@@ -1,11 +1,13 @@
 import logging
-from datetime import datetime
 import json
 import threading
-from collections import OrderedDict
 import uuid
-import functools
-from contextdecorator import ContextDecorator, contextmanager
+from datetime import datetime
+from collections import OrderedDict
+
+from contextdecorator import ContextDecorator
+from exceptions import MetricsObjectClosedError
+
 logger = logging.getLogger('metrics')
 threadLocal = threading.local()
 
@@ -19,9 +21,11 @@ class MetricsProvider(ContextDecorator):
         self.m = MetricsProvider.get_metrics(self.name)
         return self.m
 
-    def __exit__(self, type, value, tracebac):
+    def __exit__(self, type, value, traceback):
         if self.m:
+            self.m.close()
             del self.m
+        return False
 
     @classmethod
     def get_metrics(cls, name):
@@ -42,6 +46,8 @@ class Metrics(object):
     counts = None
     exceptions = None
 
+    is_open = True
+
     def __init__(self, name, unique_id, parent=None):
         self.name = name
         self.guid = unique_id
@@ -51,18 +57,30 @@ class Metrics(object):
         self.exceptions = {}
 
     def __del__(self):
-        self.end_time = datetime.now()
-        logger.info(self._jsonify())
+        if self.is_open:
+            self.close()
+
+    def close(self):
+        if self.is_open:
+            self.end_time = datetime.now()
+            self.is_open = False
+            logger.info(self._jsonify())
 
     def set_identity_user_id(self, identity_username):
         self.identity_user_id = identity_username
 
     def add_count(self, event_name, number):
-        self.counts[event_name] = self.counts.get(event_name, 0) + number
+        if self.is_open:
+            self.counts[event_name] = self.counts.get(event_name, 0) + number
+        else:
+            raise MetricsObjectClosedError("Attempted to use closed metrics object")
 
     def add_exception(self, exception):
-        exception_name = exception.__class__.__name__
-        self.exceptions[exception_name] = self.exceptions.get(exception_name, 0) + 1
+        if self.is_open:
+            exception_name = exception.__class__.__name__
+            self.exceptions[exception_name] = self.exceptions.get(exception_name, 0) + 1
+        else:
+            raise MetricsObjectClosedError("Attempted to use closed metrics object")
 
     def _jsonify(self):
         obj = OrderedDict([
